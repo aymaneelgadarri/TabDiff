@@ -28,6 +28,11 @@ warnings.filterwarnings('ignore')
 
 def main(args):
     device = args.device
+    print(f"Using device: {device}")
+    print(f"CUDA available: {torch.cuda.is_available()}")
+    if torch.cuda.is_available():
+        print(f"Current CUDA device: {torch.cuda.current_device()}")
+        print(f"CUDA device name: {torch.cuda.get_device_name()}")
 
     ## Disable scientific numerical format
     np.set_printoptions(suppress=True)
@@ -48,6 +53,7 @@ def main(args):
     if args.exp_name is None:
         exp_name = 'non_learnable_schedule' if args.non_learnable_schedule else 'learnable_schedule'
     exp_name += '_y_only' if args.y_only else ''
+    exp_name += '_binary_cat_only' if args.binary_cat_only else ''
     
     ## Load configs
     curr_dir = os.path.dirname(os.path.abspath(__file__))
@@ -57,6 +63,8 @@ def main(args):
     print(f"{args.mode.capitalize()} Mode is Enabled")
     num_samples_to_generate = None
     ckpt_path = None
+    binary_cat_only = args.binary_cat_only
+    binary_encoding_k = args.binary_encoding_k
     if args.mode == 'train':
         print("NEW training is started")
     elif args.mode == 'test':
@@ -72,6 +80,9 @@ def main(args):
             with open(config_path, 'rb') as f:
                 cached_raw_config = pickle.load(f)
                 print(f"Found cached config at {config_path}")
+                # Use binary_cat_only from cached config during test
+                binary_cat_only = cached_raw_config.get('binary_cat_only', False)
+                binary_encoding_k = cached_raw_config.get('binary_encoding_k', 10)
         raw_config = cached_raw_config
     
     
@@ -119,11 +130,14 @@ def main(args):
         raw_config['diffusion_params']['num_timesteps'] = 4
         raw_config['train']['main']['batch_size'] = 4096
         raw_config['sample']['batch_size'] = 10000
+    
+    # Set training steps from args
+    raw_config['train']['main']['steps'] = args.steps
 
     ## Load training data
     batch_size = raw_config['train']['main']['batch_size']
 
-    train_data = TabDiffDataset(dataname, data_dir, info, y_only=args.y_only, isTrain=True, dequant_dist=raw_config['data']['dequant_dist'], int_dequant_factor=raw_config['data']['int_dequant_factor'])
+    train_data = TabDiffDataset(dataname, data_dir, info, y_only=args.y_only, isTrain=True, dequant_dist=raw_config['data']['dequant_dist'], int_dequant_factor=raw_config['data']['int_dequant_factor'], binary_cat_only=binary_cat_only, binary_encoding_k=binary_encoding_k, device=device)
     train_loader = DataLoader(
         train_data,
         batch_size = batch_size,
@@ -132,8 +146,20 @@ def main(args):
     )
     d_numerical, categories = train_data.d_numerical, train_data.categories
     
-    val_data = TabDiffDataset(dataname, data_dir, info, y_only=args.y_only, isTrain=False, dequant_dist=raw_config['data']['dequant_dist'], int_dequant_factor=raw_config['data']['int_dequant_factor'])
+    val_data = TabDiffDataset(dataname, data_dir, info, y_only=args.y_only, isTrain=False, dequant_dist=raw_config['data']['dequant_dist'], int_dequant_factor=raw_config['data']['int_dequant_factor'], binary_cat_only=binary_cat_only, binary_encoding_k=binary_encoding_k, device=device)
 
+    ## Store binary encoder and parameters in config if enabled
+    if binary_cat_only:
+        raw_config['binary_cat_only'] = True
+        raw_config['binary_encoding_k'] = binary_encoding_k
+        # Store encoder parameters
+        raw_config['binary_encoder_params'] = {
+            'marginal_probs': train_data.binary_encoder.marginal_probs.tolist(),
+            'thresholds': train_data.binary_encoder.thresholds.tolist(),
+        }
+    else:
+        raw_config['binary_cat_only'] = False
+    
     ## Load Metrics
     real_data_path = f'synthetic/{dataname}/real.csv'
     test_data_path = f'synthetic/{dataname}/test.csv'
@@ -186,7 +212,9 @@ def main(args):
         **raw_config['unimodmlp_params']
     )
     model = Model(backbone, **raw_config['diffusion_params']['edm_params'])
+    print(f"Model device before to(device): {next(model.parameters()).device}")
     model.to(device)
+    print(f"Model device after to(device): {next(model.parameters()).device}")
     
     ## Create and load y_only_model for imputation
     y_only_model = None
@@ -241,6 +269,20 @@ def main(args):
 
     ## Load Trainer
     sample_batch_size = raw_config['sample']['batch_size']
+    
+    # Get binary encoder if enabled
+    binary_encoder = None
+    if raw_config.get('binary_cat_only', False):
+        from tabdiff.utils import BinaryCategoricalEncoder
+        binary_encoder = BinaryCategoricalEncoder(k=raw_config.get('binary_encoding_k', 10))
+        if args.mode == 'train':
+            binary_encoder = train_data.binary_encoder
+        else:
+            # Load encoder parameters from config during test mode
+            encoder_params = raw_config.get('binary_encoder_params', {})
+            binary_encoder.marginal_probs = np.array(encoder_params['marginal_probs'])
+            binary_encoder.thresholds = np.array(encoder_params['thresholds'])
+    
     trainer = Trainer(
         diffusion,
         train_loader,
@@ -255,7 +297,9 @@ def main(args):
         result_save_path=raw_config['result_save_path'],
         device=device,
         ckpt_path=ckpt_path,
-        y_only=args.y_only
+        y_only=args.y_only,
+        binary_encoder=binary_encoder,
+        binary_cat_only=raw_config.get('binary_cat_only', False)
     )
     if args.mode == 'test':
         if args.report:
@@ -288,8 +332,39 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(description='Training of TabDiff')
 
+    # General configs
     parser.add_argument('--dataname', type=str, default='adult', help='Name of dataset.')
+    parser.add_argument('--mode', type=str, default='train', help='train or test')
     parser.add_argument('--gpu', type=int, default=0, help='GPU index.')
+    parser.add_argument('--debug', action='store_true', help='Enable debug mode')
+    parser.add_argument('--no_wandb', action='store_true', help='disable wandb')
+    parser.add_argument('--exp_name', type=str, default=None, help='Experiment name')
+    parser.add_argument('--deterministic', action='store_true', help='Whether to make the entire process deterministic')
+    parser.add_argument('--steps', type=int, default=40000, help='Number of training steps/epochs')
+    
+    # Configs for tabdiff
+    parser.add_argument('--y_only', action='store_true', help='Train guidance model that only models the target column')
+    parser.add_argument('--non_learnable_schedule', action='store_true', help='disable learnable noise schedule')
+    
+    # Binary categorical only dataset support
+    parser.add_argument('--binary_cat_only', action='store_true', help='Enable special processing for datasets with only binary categorical variables')
+    parser.add_argument('--binary_encoding_k', type=int, default=10, help='Number of truncated Gaussian samples per categorical sample')
+    
+    # Configs for testing tabdiff
+    parser.add_argument('--num_samples_to_generate', type=int, default=None, help='Number of samples to be generated while testing')
+    parser.add_argument('--ckpt_path', type=str, default=None, help='Path to the model checkpoint to be tested')
+    parser.add_argument('--report', action='store_true', help="Report testing mode")
+    parser.add_argument('--num_runs', type=int, default=20, help="Number of runs to be averaged in the report testing mode")
+    
+    # Configs for imputation
+    parser.add_argument('--impute', action='store_true')
+    parser.add_argument('--trial_start', type=int, default=0)
+    parser.add_argument('--trial_size', type=int, default=50)
+    parser.add_argument('--resample_rounds', type=int, default=1)
+    parser.add_argument('--impute_condition', type=str, default="x_t")
+    parser.add_argument('--y_only_model_path', type=str, default=None, help="Path to the y_only model checkpoint")
+    parser.add_argument('--w_num', type=float, default=0.6)
+    parser.add_argument('--w_cat', type=float, default=0.6)
 
     args = parser.parse_args()
 
@@ -298,3 +373,5 @@ if __name__ == '__main__':
         args.device = f'cuda:{args.gpu}'
     else:
         args.device = 'cpu'
+    
+    main(args)

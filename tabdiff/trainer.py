@@ -33,12 +33,18 @@ class Trainer:
             closs_weight_schedule = "fixed",
             c_lambda = 1.0,
             d_lambda = 1.0,
-            device=torch.device('cuda:1'),
+            device=torch.device('cuda:0'),
             ckpt_path = None,
             y_only=False,
+            binary_encoder=None,
+            binary_cat_only=False,
             **kwargs
     ):
+        print(f"Trainer device: {device}")
+        print(f"Diffusion device: {next(diffusion.parameters()).device}")
         self.y_only = y_only
+        self.binary_encoder = binary_encoder
+        self.binary_cat_only = binary_cat_only
         self.diffusion = diffusion
         self.ema_model = deepcopy(self.diffusion._denoise_fn)
         for param in self.ema_model.parameters():
@@ -71,6 +77,8 @@ class Trainer:
         self.check_val_every = check_val_every
         
         self.device = device
+        print(f"Trainer device after assignment: {self.device}")
+        print(f"Diffusion device after assignment: {next(self.diffusion.parameters()).device}")
         self.model_save_path = model_save_path
         self.result_save_path = result_save_path
         self.ckpt_path = ckpt_path
@@ -468,7 +476,29 @@ class Trainer:
         int_inverse = self.dataset.int_inverse
         cat_inverse = self.dataset.cat_inverse
         
-        if self.y_only:
+        if self.binary_cat_only:
+            # Decode continuous data back to binary categorical
+            syn_data_np = syn_data.cpu().numpy()
+            decoded_cat_data = self.binary_encoder.decode(syn_data_np)
+            
+            # Create synthetic dataframe with proper column mapping
+            syn_df = pd.DataFrame(decoded_cat_data)
+            
+            # Map columns back to original names
+            column_names = []
+            # First add target column name if it's the first column in the encoded data
+            if info['task_type'] == 'binclass':
+                column_names.append(info['column_names'][info['target_col_idx'][0]])
+                # Then add the rest of the feature columns
+                for idx in info['cat_col_idx']:
+                    column_names.append(info['column_names'][idx])
+            else:
+                # For other task types, maintain original column order
+                column_names = [info['column_names'][i] for i in range(len(info['column_names']))]
+            
+            syn_df.columns = column_names[:decoded_cat_data.shape[1]]
+            
+        elif self.y_only:
             if info['task_type'] == 'binclass':
                 syn_data = cat_inverse(syn_data)
             else:
@@ -585,15 +615,23 @@ def split_num_cat_target(syn_data, info, num_inverse, int_inverse, cat_inverse):
     syn_num = syn_data[:, :n_num_feat]
     syn_cat = syn_data[:, n_num_feat:]
 
-    syn_num = num_inverse(syn_num).astype(np.float32)
-    syn_num = int_inverse(syn_num).astype(np.float32)
-    syn_cat = cat_inverse(syn_cat)
+    # Convert to numpy for transforms
+    syn_num = syn_num.cpu().numpy()
+    syn_cat = syn_cat.cpu().numpy()
 
+    def apply_inverse(transform, x):
+        if hasattr(transform, 'inverse_transform'):
+            return transform.inverse_transform(x)
+        else:
+            return transform(x)
+
+    syn_num = apply_inverse(num_inverse, syn_num).astype(np.float32)
+    syn_num = apply_inverse(int_inverse, syn_num).astype(np.float32)
+    syn_cat = apply_inverse(cat_inverse, syn_cat)
 
     if info['task_type'] == 'regression':
         syn_target = syn_num[:, :len(target_col_idx)]
         syn_num = syn_num[:, len(target_col_idx):]
-    
     else:
         print(syn_cat.shape)
         syn_target = syn_cat[:, :len(target_col_idx)]

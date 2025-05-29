@@ -31,29 +31,29 @@ P_mean = -1.2
 P_std = 1.2
 
 [diffusion_params.noise_schedule_params]
-sigma_min = 0.002
-sigma_max = 80
-rho = 7
+sigma_min = 0.001
+sigma_max = 40.0
+rho = 5
 eps_max = 1e-3
 eps_min = 1e-5
-rho_init = 7.0
-rho_offset = 5.0
-k_init=-6.0
-k_offset=1.0
+rho_init = 5.0
+rho_offset = 3.0
+k_init = -4.0
+k_offset = 0.5
 
 [train.main]
-steps = 8000
-lr = 0.001
+steps = 100
+lr = 0.0005
 weight_decay = 0
 ema_decay = 0.997
-batch_size = 4096
+batch_size = 2048
 check_val_every = 2000
 lr_scheduler = "reduce_lr_on_plateau"
-factor = 0.90           # hyperparam for reduce_lr_on_plateau
-reduce_lr_patience = 50        # hyperparam for reduce_lr_on_plateau
-closs_weight_schedule = "anneal"
+factor = 0.90
+reduce_lr_patience = 50
+closs_weight_schedule = "fixed"
 c_lambda = 1.0
-d_lambda = 1.0
+d_lambda = 0.0
 
 [sample]
 batch_size = 10000

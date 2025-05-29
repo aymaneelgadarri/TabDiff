@@ -14,10 +14,15 @@ if __name__ == '__main__':
     parser.add_argument('--no_wandb', action='store_true', help='disable wandb')
     parser.add_argument('--exp_name', type=str, default=None, help='Experiment name, used to name log directories and the wandb run name')
     parser.add_argument('--deterministic', action='store_true', help='Whether to make the entire process deterministic, i.e., fix global random seeds')
+    parser.add_argument('--steps', type=int, default=8000, help='Number of training steps/epochs')
     
     # Configs for tabdiff
     parser.add_argument('--y_only', action='store_true', help='Train guidance model that only model the target column')
     parser.add_argument('--non_learnable_schedule', action='store_true', help='disable learnable noise schedule')
+    
+    # Binary categorical only dataset support
+    parser.add_argument('--binary_cat_only', action='store_true', help='Enable special processing for datasets with only binary categorical variables')
+    parser.add_argument('--binary_encoding_k', type=int, default=10, help='Number of truncated Gaussian samples per categorical sample')
     
     # Configs for testing tabdiff
     parser.add_argument('--num_samples_to_generate', type=int, default=None, help='Number of samples to be generated while testing')
@@ -38,9 +43,13 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     # check cuda
-    if args.gpu != -1 and torch.cuda.is_available():
+    if torch.cuda.is_available():
         args.device = f'cuda:{args.gpu}'
+        torch.cuda.set_device(args.gpu)  # Set the default CUDA device
+        print(f"CUDA is available. Using device: {args.device}")
     else:
         args.device = 'cpu'
+        print("CUDA is not available. Using CPU.")
     
+    # Pass all arguments to tabdiff_main
     tabdiff_main(args)

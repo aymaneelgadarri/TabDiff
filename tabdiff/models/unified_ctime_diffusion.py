@@ -7,7 +7,7 @@ from tqdm import tqdm
 from itertools import chain
 
 """
-“Our implementation of the continuous-time masked diffusion is inspired by https://arxiv.org/abs/2406.07524's implementation at [https://github.com/kuleshov-group/mdlm], with modifications to support data distributions that include categorical dimensions of different sizes.”
+"Our implementation of the continuous-time masked diffusion is inspired by https://arxiv.org/abs/2406.07524's implementation at [https://github.com/kuleshov-group/mdlm], with modifications to support data distributions that include categorical dimensions of different sizes.”
 """
 
 S_churn= 1
@@ -35,6 +35,8 @@ class UnifiedCtimeDiffusion(torch.nn.Module):
         ):
 
         super(UnifiedCtimeDiffusion, self).__init__()
+        print(f"UnifiedCtimeDiffusion device: {device}")
+        print(f"Denoise function device: {next(denoise_fn.parameters()).device}")
 
         self.num_numerical_features = num_numerical_features
         self.num_classes = num_classes # it as a vector [K1, K2, ..., Km]
@@ -77,6 +79,8 @@ class UnifiedCtimeDiffusion(torch.nn.Module):
         self.cat_mask_idx = []
         
         self.device = device
+        print(f"UnifiedCtimeDiffusion device after assignment: {self.device}")
+        print(f"Denoise function device after assignment: {next(self._denoise_fn.parameters()).device}")
         
         if self.scheduler == 'power_mean':
             self.num_schedule = PowerMeanNoise(**noise_schedule_params)

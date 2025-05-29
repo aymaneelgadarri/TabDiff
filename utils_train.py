@@ -7,6 +7,11 @@ from torch.utils.data import Dataset
 import torch
 
 
+class IdentityTransform:
+    def inverse_transform(self, x):
+        return x
+
+
 class TabularDataset(Dataset):
     def __init__(self, X_num, X_cat):
         self.X_num = X_num
@@ -24,11 +29,15 @@ class TabularDataset(Dataset):
         return self.X_num.shape[0]
     
 class TabDiffDataset(Dataset):
-    def __init__(self, dataname, data_dir, info, isTrain=True, y_only=False, dequant_dist='none', int_dequant_factor=0.0):
+    def __init__(self, dataname, data_dir, info, isTrain=True, y_only=False, dequant_dist='none', int_dequant_factor=0.0, binary_cat_only=False, binary_encoding_k=10, device='cpu'):
         self.dataname = dataname
         self.data_dir = data_dir
         self.info = info
         self.isTrain = isTrain
+        self.binary_cat_only = binary_cat_only
+        self.binary_encoding_k = binary_encoding_k
+        self.binary_encoder = None
+        self.device = device
 
         X_num, X_cat, categories, d_numerical, num_inverse, int_inverse, cat_inverse = preprocess(data_dir, y_only, dequant_dist, int_dequant_factor, task_type = info['task_type'], inverse=True)
         categories = np.array(categories)
@@ -39,8 +48,32 @@ class TabDiffDataset(Dataset):
         X_train_num, X_test_num = X_num
         X_train_cat, X_test_cat = X_cat
 
-        X_train_num, X_test_num = torch.tensor(X_train_num).float(), torch.tensor(X_test_num).float()
-        X_train_cat, X_test_cat =  torch.tensor(X_train_cat), torch.tensor(X_test_cat)
+        # Apply binary categorical encoding if enabled
+        if binary_cat_only:
+            from tabdiff.utils import BinaryCategoricalEncoder
+            self.binary_encoder = BinaryCategoricalEncoder(k=binary_encoding_k, device=device)
+            
+            # Fit encoder on training data
+            self.binary_encoder.fit(X_train_cat)
+            
+            # Encode categorical data to continuous
+            X_train_encoded = self.binary_encoder.encode(X_train_cat)
+            X_test_encoded = self.binary_encoder.encode(X_test_cat)
+            
+            # Convert encoded data to tensors
+            X_train_num = torch.tensor(X_train_encoded).float()
+            X_test_num = torch.tensor(X_test_encoded).float()
+            
+            # Set categorical columns to empty since we're treating everything as continuous
+            X_train_cat = torch.zeros((X_train_num.shape[0], 0), dtype=torch.long)
+            X_test_cat = torch.zeros((X_test_num.shape[0], 0), dtype=torch.long)
+            
+            # Update dimensions
+            d_numerical = X_train_num.shape[1]
+            categories = np.array([])
+        else:
+            X_train_num, X_test_num = torch.tensor(X_train_num).float(), torch.tensor(X_test_num).float()
+            X_train_cat, X_test_cat =  torch.tensor(X_train_cat), torch.tensor(X_test_cat)
 
         self.X = torch.cat((X_train_num, X_train_cat), dim=1) if isTrain else torch.cat((X_test_num, X_test_cat), dim=1)
         self.num_inverse = num_inverse
@@ -94,9 +127,9 @@ def preprocess(dataset_path, y_only=False, dequant_dist='none', int_dequant_fact
 
 
         if inverse:
-            num_inverse = dataset.num_transform.inverse_transform if dataset.num_transform is not None else lambda x: x
-            int_inverse = dataset.int_transform.inverse_transform if dataset.int_transform is not None else lambda x: x
-            cat_inverse = dataset.cat_transform.inverse_transform if dataset.cat_transform is not None else lambda x: x
+            num_inverse = dataset.num_transform.inverse_transform if dataset.num_transform is not None else IdentityTransform()
+            int_inverse = dataset.int_transform.inverse_transform if dataset.int_transform is not None else IdentityTransform()
+            cat_inverse = dataset.cat_transform.inverse_transform if dataset.cat_transform is not None else IdentityTransform()
 
             return X_num, X_cat, categories, d_numerical, num_inverse, int_inverse, cat_inverse
         else:
