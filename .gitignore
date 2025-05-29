@@ -3,6 +3,7 @@
 
 data/*
 !/data/Info/
+!/data/disease
 
 wandb/
 eval/

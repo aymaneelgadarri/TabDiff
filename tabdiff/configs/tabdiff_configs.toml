@@ -4,16 +4,16 @@ int_dequant_factor = 0
 use_covariance_noise = true  # New flag for covariance-based noising
 
 [unimodmlp_params]
-num_layers = 2
-d_token = 4
-n_head = 1
-factor = 32
+num_layers = 6
+d_token = 16
+n_head = 4
+factor = 64
 bias = true
-dim_t = 1024
+dim_t = 2048
 use_mlp = true
 
 [diffusion_params]
-num_timesteps = 50
+num_timesteps = 100
 scheduler='power_mean'      # 'power_mean', 'power_mean_unified', 'power_mean_per_column'
 cat_scheduler='log_linear'        # 'log_linear', 'log_linear_unified', 'log_linear_per_column'
 noise_dist='uniform_t'       #'uniform_t' or 'log_norm'
@@ -24,7 +24,7 @@ second_order_correction = true
 
 [diffusion_params.edm_params]
 precond = true
-sigma_data = 1.0
+sigma_data = 0.1
 net_conditioning = "sigma"
 
 [diffusion_params.noise_dist_params]
@@ -32,29 +32,29 @@ P_mean = -1.2
 P_std = 1.2
 
 [diffusion_params.noise_schedule_params]
-sigma_min = 0.001
-sigma_max = 40.0
-rho = 5
-eps_max = 1e-3
-eps_min = 1e-5
-rho_init = 5.0
-rho_offset = 3.0
-k_init = -4.0
-k_offset = 0.5
+sigma_min = 0.01
+sigma_max = 5.0
+rho = 1.5
+eps_max = 1e-2
+eps_min = 1e-4
+rho_init = 1.5
+rho_offset = 1.5
+k_init = -2.0
+k_offset = 1.0
 
 [train.main]
-steps = 100
-lr = 0.001
-weight_decay = 0
-ema_decay = 0.997
-batch_size = 2048
+steps = 200
+lr = 0.0001
+weight_decay = 1e-4
+ema_decay = 0.999
+batch_size = 1024
 check_val_every = 2
 lr_scheduler = "reduce_lr_on_plateau"
-factor = 0.90
+factor = 0.5
 reduce_lr_patience = 50
-closs_weight_schedule = "fixed"
-c_lambda = 1.0
-d_lambda = 0.0
+closs_weight_schedule = "anneal"
+c_lambda = 0.1
+d_lambda = 0.1
 
 [sample]
 batch_size = 10000
