@@ -31,6 +31,8 @@ class UnifiedCtimeDiffusion(torch.nn.Module):
             noise_schedule_params={},
             sampler_params={},
             device=torch.device('cpu'),
+            use_covariance_noise=False,
+            empirical_covariance=None,
             **kwargs
         ):
 
@@ -69,6 +71,8 @@ class UnifiedCtimeDiffusion(torch.nn.Module):
         self.edm_params = edm_params
         self.noise_dist_params = noise_dist_params
         self.sampler_params = sampler_params
+        self.use_covariance_noise = use_covariance_noise
+        self.empirical_covariance = empirical_covariance
         if self.num_numerical_features == 0:
             self.sampler_params['stochastic_sampler'] = False
             self.sampler_params['second_order_correction'] = False
@@ -83,7 +87,13 @@ class UnifiedCtimeDiffusion(torch.nn.Module):
         print(f"Denoise function device after assignment: {next(self._denoise_fn.parameters()).device}")
         
         if self.scheduler == 'power_mean':
-            self.num_schedule = PowerMeanNoise(**noise_schedule_params)
+            if self.use_covariance_noise:
+                self.num_schedule = CovariancePowerMeanNoise(
+                    covariance_matrix=empirical_covariance,
+                    **noise_schedule_params
+                )
+            else:
+                self.num_schedule = PowerMeanNoise(**noise_schedule_params)
         elif self.scheduler == 'power_mean_per_column':
             self.num_schedule = PowerMeanNoise_PerColumn(num_numerical = num_numerical_features, **noise_schedule_params)
         else:
@@ -95,6 +105,22 @@ class UnifiedCtimeDiffusion(torch.nn.Module):
             self.cat_schedule = LogLinearNoise_PerColumn(num_categories = len(num_classes), **noise_schedule_params)
         else:
             raise NotImplementedError(f"The noise schedule--{self.cat_scheduler}-- is not implemented for discrete data at CTIME ")
+
+    def update_empirical_covariance(self, covariance_matrix):
+        """Update the empirical covariance matrix for the noise schedule."""
+        self.empirical_covariance = covariance_matrix
+        if self.use_covariance_noise and hasattr(self.num_schedule, 'update_covariance'):
+            self.num_schedule.update_covariance(covariance_matrix)
+
+    def _sample_covariance_noise(self, shape, device=None):
+        """Sample noise with covariance structure if enabled."""
+        if device is None:
+            device = self.device
+        noise = torch.randn(shape, device=device)
+        if self.use_covariance_noise and hasattr(self.num_schedule, 'sigma_sqrt'):
+            # Apply covariance transformation: noise @ Sigma^0.5
+            noise = torch.matmul(noise, self.num_schedule.sigma_sqrt.T)
+        return noise
 
     def mixed_loss(self, x):
         b = x.shape[0]
@@ -127,7 +153,7 @@ class UnifiedCtimeDiffusion(torch.nn.Module):
         # Continuous forward diff
         x_num_t = x_num
         if x_num.shape[1] > 0:
-            noise = torch.randn_like(x_num)
+            noise = self._sample_covariance_noise(x_num.shape, device=x_num.device)
             x_num_t = x_num + noise * sigma_num
         
         # Discrete forward diff
@@ -191,7 +217,8 @@ class UnifiedCtimeDiffusion(torch.nn.Module):
             sigma_cat_hat = sigma_cat_cur
                 
         # Sample priors for the continuous dimensions
-        z_norm = torch.randn((b, self.num_numerical_features), device=device) * sigma_num_cur[-1] 
+        noise = self._sample_covariance_noise((b, self.num_numerical_features), device=device)
+        z_norm = noise * sigma_num_cur[-1] 
             
         # Sample priors for the discrete dimensions
         has_cat = len(self.num_classes) > 0
@@ -417,7 +444,8 @@ class UnifiedCtimeDiffusion(torch.nn.Module):
         has_cat = len(self.num_classes) > 0
         
         # Get x_num_hat by move towards the noise by a small step
-        x_num_hat = x_num_cur + (sigma_num_hat ** 2 - sigma_num_cur ** 2).sqrt() * S_noise * torch.randn_like(x_num_cur)
+        noise = self._sample_covariance_noise(x_num_cur.shape, device=x_num_cur.device) 
+        x_num_hat = x_num_cur + (sigma_num_hat ** 2 - sigma_num_cur ** 2).sqrt() * S_noise * noise
         # Get x_cat_hat
         move_chance = -torch.expm1(sigma_cat_cur - sigma_cat_hat)    # the incremental move change is 1 - alpha_t/alpha_s = 1 - exp(sigma_s - sigma_t)
         x_cat_hat, _ = self.q_xt(x_cat_cur, move_chance) if has_cat else (x_cat_cur, x_cat_cur)
@@ -551,7 +579,8 @@ class UnifiedCtimeDiffusion(torch.nn.Module):
 
         # Sample priors for the continuous dimensions
         if impute_condition == "x_t":
-            z_norm = x_num + torch.randn((b, self.num_numerical_features), device=device) * sigma_num_cur[-1]   # z_{t_max} = x_0(masked) + sigma_max*epsilon
+            noise = self._sample_covariance_noise((b, self.num_numerical_features), device=device)
+            z_norm = x_num + noise * sigma_num_cur[-1]   # z_{t_max} = x_0(masked) + sigma_max*epsilon
         elif impute_condition == "x_0":
             z_norm = x_num
             
@@ -573,7 +602,8 @@ class UnifiedCtimeDiffusion(torch.nn.Module):
             for u in range (resample_rounds):
                 # Get known parts by Forward Flow
                 if impute_condition == "x_t":
-                    z_norm_known = x_num + torch.randn((b, self.num_numerical_features), device=device) * sigma_num_next[i]
+                    noise = self._sample_covariance_noise((b, self.num_numerical_features), device=device)
+                    z_norm_known = x_num + noise * sigma_num_next[i]
                     move_chance = 1 - torch.exp(-sigma_cat_next[i]) if i < (self.num_timesteps-1) else torch.ones_like(sigma_cat_next[i])     # force move_chance to be 1 for the first iteration
                     z_cat_known, _ = self.q_xt(x_cat, move_chance)
                 elif impute_condition == "x_0":
@@ -592,7 +622,8 @@ class UnifiedCtimeDiffusion(torch.nn.Module):
 
                 # Resample x_t from x_{t-1} by Foward Step
                 if u < resample_rounds-1:
-                    z_norm = z_norm + (sigma_num_cur[i] ** 2 - sigma_num_next[i] ** 2).sqrt() * S_noise * torch.randn_like(z_norm)
+                    noise = self._sample_covariance_noise(z_norm.shape, device=z_norm.device)
+                    z_norm = z_norm + (sigma_num_cur[i] ** 2 - sigma_num_next[i] ** 2).sqrt() * S_noise * noise
                     move_chance = -torch.expm1(sigma_cat_next[i] - sigma_cat_cur[i])
                     z_cat, _ = self.q_xt(z_cat, move_chance)
         

@@ -148,6 +148,28 @@ def main(args):
     
     val_data = TabDiffDataset(dataname, data_dir, info, y_only=args.y_only, isTrain=False, dequant_dist=raw_config['data']['dequant_dist'], int_dequant_factor=raw_config['data']['int_dequant_factor'], binary_cat_only=binary_cat_only, binary_encoding_k=binary_encoding_k, device=device)
 
+    ## Compute empirical covariance if using binary encoder with covariance noise
+    empirical_covariance = None
+    if binary_cat_only and raw_config['data'].get('use_covariance_noise', False):
+        if args.mode == 'train':
+            print("Computing empirical covariance matrix for binary encoded data...")
+            # Get all training data as numpy array
+            X_train = train_data.X[:, :d_numerical].cpu().numpy()  # Only numerical features (which are the encoded categorical)
+            
+            # Compute empirical covariance matrix
+            empirical_covariance = np.cov(X_train, rowvar=False)
+            print(f"Empirical covariance matrix shape: {empirical_covariance.shape}")
+            
+            # Save covariance matrix in config for reproducibility
+            raw_config['empirical_covariance'] = empirical_covariance.tolist()
+        else:  # test mode
+            # Load empirical covariance from saved config
+            if 'empirical_covariance' in raw_config:
+                empirical_covariance = np.array(raw_config['empirical_covariance'])
+                print(f"Loaded empirical covariance matrix from config, shape: {empirical_covariance.shape}")
+            else:
+                print("Warning: use_covariance_noise is True but no empirical_covariance found in saved config")
+
     ## Store binary encoder and parameters in config if enabled
     if binary_cat_only:
         raw_config['binary_cat_only'] = True
@@ -240,6 +262,10 @@ def main(args):
     if not args.y_only and not args.non_learnable_schedule:
         raw_config['diffusion_params']['scheduler'] = 'power_mean_per_column'
         raw_config['diffusion_params']['cat_scheduler'] = 'log_linear_per_column'
+    
+    # Pass use_covariance_noise flag and empirical covariance to diffusion model
+    use_covariance_noise = binary_cat_only and raw_config['data'].get('use_covariance_noise', False)
+    
     diffusion = UnifiedCtimeDiffusion(
         num_classes=categories,
         num_numerical_features=d_numerical,
@@ -247,6 +273,8 @@ def main(args):
         y_only_model=y_only_model,
         **raw_config['diffusion_params'],
         device=device,
+        use_covariance_noise=use_covariance_noise,
+        empirical_covariance=empirical_covariance,
     )
     num_params = sum(p.numel() for p in diffusion.parameters())
     print("The number of parameters = ", num_params)
@@ -348,8 +376,7 @@ if __name__ == '__main__':
     
     # Binary categorical only dataset support
     parser.add_argument('--binary_cat_only', action='store_true', help='Enable special processing for datasets with only binary categorical variables')
-    parser.add_argument('--binary_encoding_k', type=int, default=10, help='Number of truncated Gaussian samples per categorical sample')
-    
+    parser.add_argument('--binary_encoding_k', type=int, default=10, help='Number of truncated Gaussian samples per categorical sample')    
     # Configs for testing tabdiff
     parser.add_argument('--num_samples_to_generate', type=int, default=None, help='Number of samples to be generated while testing')
     parser.add_argument('--ckpt_path', type=str, default=None, help='Path to the model checkpoint to be tested')

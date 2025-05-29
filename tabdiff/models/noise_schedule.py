@@ -2,6 +2,7 @@ import abc
 
 import torch
 import torch.nn as nn
+import numpy as np
 
 
 class Noise(abc.ABC, nn.Module):
@@ -155,3 +156,75 @@ class LogLinearNoise_PerColumn(nn.Module):
     total_noise = -torch.log1p(-((1 - self.eps_max - self.eps_min) * t.pow(k) + self.eps_min))
 
     return total_noise
+
+
+class CovariancePowerMeanNoise(Noise):
+  """
+  Power mean noise schedule that stores empirical covariance matrix.
+  The covariance is applied during noise sampling, not in the schedule itself.
+  """
+  def __init__(self, sigma_min=0.002, sigma_max=80, rho=7, covariance_matrix=None, **kwargs):
+    super().__init__()
+    self.sigma_min = sigma_min
+    self.sigma_max = sigma_max
+    self.raw_rho = rho
+    
+    # Initialize with identity matrix if no covariance provided
+    if covariance_matrix is None:
+      self.register_buffer('sigma_sqrt', torch.eye(1))
+    else:
+      # Compute square root of covariance matrix
+      if isinstance(covariance_matrix, np.ndarray):
+        covariance_matrix = torch.from_numpy(covariance_matrix).float()
+      
+      # Compute matrix square root using eigendecomposition
+      eigenvalues, eigenvectors = torch.linalg.eigh(covariance_matrix)
+      # Ensure numerical stability by clipping small negative eigenvalues
+      eigenvalues = torch.clamp(eigenvalues, min=1e-6)
+      sigma_sqrt = eigenvectors @ torch.diag(eigenvalues.sqrt()) @ eigenvectors.T
+      self.register_buffer('sigma_sqrt', sigma_sqrt)
+    
+  def rho(self):
+    return torch.tensor(self.raw_rho)
+  
+  def total_noise(self, t):
+    """
+    Compute total noise schedule (scalar values).
+    The covariance scaling is applied separately during noise sampling.
+    t: [batch_size, 1] or [batch_size]
+    Returns: [batch_size, 1]
+    """
+    if t.dim() == 1:
+      t = t.unsqueeze(-1)
+    
+    # Base noise schedule (scalar for each timestep)
+    sigma = (self.sigma_min ** (1/self.rho()) + t * (
+                self.sigma_max ** (1/self.rho()) - self.sigma_min ** (1/self.rho()))).pow(self.rho())
+    
+    return sigma
+  
+  def inverse_to_t(self, sigma):
+    """
+    Inverse function to map sigma back to t.
+    sigma: [batch_size, 1] or [batch_size]
+    Returns: t: [batch_size, 1]
+    """
+    if sigma.dim() == 1:
+      sigma = sigma.unsqueeze(-1)
+      
+    t = (sigma.pow(1/self.rho()) - self.sigma_min ** (1/self.rho())) / (
+         self.sigma_max ** (1/self.rho()) - self.sigma_min ** (1/self.rho()))
+    
+    return t
+  
+  def update_covariance(self, covariance_matrix):
+    """Update the covariance matrix and recompute its square root."""
+    if isinstance(covariance_matrix, np.ndarray):
+      covariance_matrix = torch.from_numpy(covariance_matrix).float()
+    
+    # Compute matrix square root using eigendecomposition
+    eigenvalues, eigenvectors = torch.linalg.eigh(covariance_matrix)
+    # Ensure numerical stability
+    eigenvalues = torch.clamp(eigenvalues, min=1e-6)
+    sigma_sqrt = eigenvectors @ torch.diag(eigenvalues.sqrt()) @ eigenvectors.T
+    self.sigma_sqrt = sigma_sqrt.to(self.sigma_sqrt.device)
